@@ -42,57 +42,63 @@ Log-Message "Pronto. Ogni file aggiunto, modificato o rimosso verra' inviato a G
 
 try {
     while ($true) {
-        Start-Sleep -Milliseconds 800
+        try {
+            Start-Sleep -Milliseconds 800
 
-        # Raccoglie tutti gli eventi del FileSystem
-        $events = Get-Event -SourceIdentifier "Fs*" -ErrorAction SilentlyContinue
-        if ($events) {
-            foreach ($evt in $events) {
-                $path = $evt.SourceEventArgs.FullPath
-                Remove-Event -EventIdentifier $evt.EventIdentifier -ErrorAction SilentlyContinue
-                
-                # Ignora cartella .git, file di log e temporanei
-                if ($path -and ($path -match "\\\.git(\\|$)" -or $path -match "\\sync_watch\.log$" -or $path -match "\.tmp$" -or $path -match "\.crdownload$")) {
-                    continue
+            # Raccoglie tutti gli eventi del FileSystem
+            $events = Get-Event -SourceIdentifier "Fs*" -ErrorAction SilentlyContinue
+            if ($events) {
+                foreach ($evt in $events) {
+                    $path = $evt.SourceEventArgs.FullPath
+                    Remove-Event -EventIdentifier $evt.EventIdentifier -ErrorAction SilentlyContinue
+                    
+                    # Ignora cartella .git, file di log e temporanei
+                    if ($path -and ($path -match "\\\.git(\\|$)" -or $path -match "\\sync_watch\.log$" -or $path -match "\.tmp$" -or $path -match "\.crdownload$")) {
+                        continue
+                    }
+
+                    $needsSync = $true
+                    $lastChangeTime = [DateTime]::UtcNow
                 }
-
-                $needsSync = $true
-                $lastChangeTime = [DateTime]::UtcNow
             }
-        }
 
-        # Quando sono passati almeno $debounceSeconds dall'ultima modifica
-        if ($needsSync) {
-            $elapsed = ([DateTime]::UtcNow - $lastChangeTime).TotalSeconds
-            if ($elapsed -ge $debounceSeconds) {
-                $needsSync = $false
+            # Quando sono passati almeno $debounceSeconds dall'ultima modifica
+            if ($needsSync) {
+                $elapsed = ([DateTime]::UtcNow - $lastChangeTime).TotalSeconds
+                if ($elapsed -ge $debounceSeconds) {
+                    $needsSync = $false
 
-                Set-Location $targetDir
-                $status = git status --porcelain
+                    Set-Location $targetDir
+                    $status = git status --porcelain
 
-                if ($status) {
-                    $ts = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-                    Log-Message "Modifiche rilevate. Sincronizzazione in corso..." "Yellow"
+                    if ($status) {
+                        $ts = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+                        Log-Message "Modifiche rilevate. Sincronizzazione in corso..." "Yellow"
 
-                    # 1. Pull per evitare conflitti con modifiche remote
-                    git pull --rebase origin main 2>&1 | Out-Null
+                        # 1. Pull per evitare conflitti con modifiche remote
+                        git pull --rebase origin main 2>&1 | Out-Null
 
-                    # 2. Add
-                    git add .
+                        # 2. Add
+                        git add .
 
-                    # 3. Commit
-                    $commitMsg = "Auto-sync: $ts"
-                    git commit -m $commitMsg 2>&1 | Out-Null
+                        # 3. Commit
+                        $commitMsg = "Auto-sync: $ts"
+                        git commit -m $commitMsg 2>&1 | Out-Null
 
-                    # 4. Push
-                    $pushResult = git push origin main 2>&1
-                    if ($LASTEXITCODE -eq 0) {
-                        Log-Message "Sincronizzato con successo su GitHub!" "Green"
-                    } else {
-                        Log-Message "Errore durante il push su GitHub:`n$pushResult" "Red"
+                        # 4. Push
+                        $pushResult = git push origin main 2>&1
+                        if ($LASTEXITCODE -eq 0) {
+                            Log-Message "Sincronizzato con successo su GitHub!" "Green"
+                        } else {
+                            Log-Message "Errore durante il push su GitHub:`n$pushResult" "Red"
+                        }
                     }
                 }
             }
+        }
+        catch {
+            Log-Message "Eccezione intercettata nel ciclo di monitoraggio: $_" "Red"
+            Start-Sleep -Seconds 2
         }
     }
 }
