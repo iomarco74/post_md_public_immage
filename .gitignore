@@ -1,0 +1,11 @@
+# File di sistema
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# Log di sincronizzazione
+*.log
+
+# File temporanei
+*.tmp
+*.crdownload
