@@ -1,6 +1,6 @@
 # ==============================================================================
 # Script di sincronizzazione automatica in tempo reale con GitHub
-# Cartella monitorata: cartella corrente dello script
+# Monitora la cartella ed effettua commit & push automatici
 # ==============================================================================
 
 $targetDir = $PSScriptRoot
@@ -20,53 +20,61 @@ function Log-Message {
 Log-Message "=== Servizio di Sincronizzazione Avviato ===" "Cyan"
 Log-Message "Monitoraggio attivo su: $targetDir" "Cyan"
 
+# Rimuovi eventuali vecchie sottoscrizioni di eventi
+Get-EventSubscriber -SourceIdentifier "Fs*" -ErrorAction SilentlyContinue | Unregister-Event -Force -ErrorAction SilentlyContinue
+Get-Event -SourceIdentifier "Fs*" -ErrorAction SilentlyContinue | Remove-Event -ErrorAction SilentlyContinue
+
 # Inizializza FileSystemWatcher
 $watcher = New-Object System.IO.FileSystemWatcher
 $watcher.Path = $targetDir
 $watcher.IncludeSubdirectories = $true
 $watcher.EnableRaisingEvents = $true
 
-$script:needsSync = $false
-$script:lastEventTime = [DateTime]::MinValue
+Register-ObjectEvent $watcher 'Created' -SourceIdentifier "FsCreated" | Out-Null
+Register-ObjectEvent $watcher 'Changed' -SourceIdentifier "FsChanged" | Out-Null
+Register-ObjectEvent $watcher 'Deleted' -SourceIdentifier "FsDeleted" | Out-Null
+Register-ObjectEvent $watcher 'Renamed' -SourceIdentifier "FsRenamed" | Out-Null
 
-$changeHandler = {
-    param($sender, $eventArgs)
-    $path = $eventArgs.FullPath
-    
-    # Ignora file git, log, o temporanei
-    if ($path -match "\\\.git" -or $path -match "\\sync_watch\.log$" -or $path -match "\.tmp$" -or $path -match "\.crdownload$") {
-        return
-    }
+$needsSync = $false
+$lastChangeTime = [DateTime]::MinValue
 
-    $script:needsSync = $true
-    $script:lastEventTime = [DateTime]::UtcNow
-}
+Log-Message "Pronto. Ogni file aggiunto, modificato o rimosso verra' inviato a GitHub entro $debounceSeconds secondi." "Green"
 
-Register-ObjectEvent $watcher 'Created' -Action $changeHandler | Out-Null
-Register-ObjectEvent $watcher 'Changed' -Action $changeHandler | Out-Null
-Register-ObjectEvent $watcher 'Deleted' -Action $changeHandler | Out-Null
-Register-ObjectEvent $watcher 'Renamed' -Action $changeHandler | Out-Null
-
-Log-Message "Pronto. Ogni file aggiunto o modificato verrà inviato a GitHub entro $debounceSeconds secondi." "Green"
-
-# Loop di monitoraggio e sync
 try {
     while ($true) {
-        Start-Sleep -Milliseconds 1000
+        Start-Sleep -Milliseconds 800
 
-        if ($script:needsSync) {
-            $elapsed = ([DateTime]::UtcNow - $script:lastEventTime).TotalSeconds
-            if ($elapsed -ge $debounceSeconds) {
-                $script:needsSync = $false
+        # Raccoglie tutti gli eventi del FileSystem
+        $events = Get-Event -SourceIdentifier "Fs*" -ErrorAction SilentlyContinue
+        if ($events) {
+            foreach ($evt in $events) {
+                $path = $evt.SourceEventArgs.FullPath
+                Remove-Event -EventIdentifier $evt.EventIdentifier -ErrorAction SilentlyContinue
                 
+                # Ignora cartella .git, file di log e temporanei
+                if ($path -and ($path -match "\\\.git(\\|$)" -or $path -match "\\sync_watch\.log$" -or $path -match "\.tmp$" -or $path -match "\.crdownload$")) {
+                    continue
+                }
+
+                $needsSync = $true
+                $lastChangeTime = [DateTime]::UtcNow
+            }
+        }
+
+        # Quando sono passati almeno $debounceSeconds dall'ultima modifica
+        if ($needsSync) {
+            $elapsed = ([DateTime]::UtcNow - $lastChangeTime).TotalSeconds
+            if ($elapsed -ge $debounceSeconds) {
+                $needsSync = $false
+
                 Set-Location $targetDir
                 $status = git status --porcelain
-                
+
                 if ($status) {
                     $ts = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-                    Log-Message "Modifiche rilevate. Avvio sincronizzazione..." "Yellow"
+                    Log-Message "Modifiche rilevate. Sincronizzazione in corso..." "Yellow"
 
-                    # 1. Pull remoto per prevenire divergenze
+                    # 1. Pull per evitare conflitti con modifiche remote
                     git pull --rebase origin main 2>&1 | Out-Null
 
                     # 2. Add
@@ -77,11 +85,11 @@ try {
                     git commit -m $commitMsg 2>&1 | Out-Null
 
                     # 4. Push
-                    $pushOutput = git push origin main 2>&1
+                    $pushResult = git push origin main 2>&1
                     if ($LASTEXITCODE -eq 0) {
-                        Log-Message "Sincronizzazione completata con successo!" "Green"
+                        Log-Message "Sincronizzato con successo su GitHub!" "Green"
                     } else {
-                        Log-Message "Attenzione: errore durante git push:`n$pushOutput" "Red"
+                        Log-Message "Errore durante il push su GitHub:`n$pushResult" "Red"
                     }
                 }
             }
@@ -91,5 +99,7 @@ try {
 finally {
     $watcher.EnableRaisingEvents = $false
     $watcher.Dispose()
+    Get-EventSubscriber -SourceIdentifier "Fs*" -ErrorAction SilentlyContinue | Unregister-Event -Force -ErrorAction SilentlyContinue
+    Get-Event -SourceIdentifier "Fs*" -ErrorAction SilentlyContinue | Remove-Event -ErrorAction SilentlyContinue
     Log-Message "=== Servizio di Sincronizzazione Fermato ===" "Cyan"
 }
